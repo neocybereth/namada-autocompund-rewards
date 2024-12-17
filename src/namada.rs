@@ -42,7 +42,7 @@ pub trait NamadaRpc {
     ) -> anyhow::Result<Vec<f64>> {
         let bonds = futures::stream::iter(validators)
             .map(|validator_address| async move {
-                self.query_bond(validator_address, &delegator, epoch)
+                self.query_bond(validator_address, delegator, epoch)
                     .await
                     .unwrap_or_default()
             })
@@ -145,10 +145,7 @@ impl NamadaRpc for NamadaSdk {
         let index_set = rpc::get_delegation_validators(&self.client, address, epoch)
             .await
             .context("Failed fetching validators")?;
-        Ok(index_set
-            .into_iter()
-            .map(|address| address)
-            .collect::<HashSet<_>>())
+        Ok(index_set.into_iter().collect::<HashSet<_>>())
     }
 
     async fn query_pos_rewards(
@@ -164,7 +161,7 @@ impl NamadaRpc for NamadaSdk {
                         .pos()
                         .rewards(
                             &self.client,
-                            &validator_address,
+                            validator_address,
                             &Some(delegator_address_clone),
                         )
                         .await
@@ -175,7 +172,7 @@ impl NamadaRpc for NamadaSdk {
             .fold(token::Amount::zero(), |acc, amount| async move {
                 acc.checked_add(amount).unwrap()
             })
-            .map(|amount| Self::amount_to_f64(amount))
+            .map(Self::amount_to_f64)
             .await
             .context("Error fetching bonds")
     }
@@ -203,6 +200,9 @@ impl NamadaRpc for NamadaSdk {
         validators: &HashSet<Address>,
         secret_key: &SecretKey,
     ) -> anyhow::Result<()> {
+
+        
+
         Ok(())
     }
 
