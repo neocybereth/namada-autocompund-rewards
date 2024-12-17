@@ -1,0 +1,1 @@
+# Namada PoS Reward Autocompounding

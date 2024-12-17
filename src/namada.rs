@@ -1,57 +1,120 @@
-use std::{collections::HashSet, ops::Add, str::FromStr};
+use std::collections::HashSet;
 
 use anyhow::Context;
 use futures::{FutureExt, StreamExt};
 use namada_sdk::{
-    address::Address, dec::Dec, key::common::SecretKey, queries::RPC, rpc, state::Epoch, token,
+    address::Address, dec::Dec, key::common::SecretKey, queries::RPC, rpc,
+    state::Epoch as NamadaEpoch, token,
 };
 use tendermint_rpc::HttpClient;
 
-use crate::utils;
-
 pub trait NamadaRpc {
-    async fn get_current_epoch(&self) -> anyhow::Result<Epoch>;
+    async fn get_current_epoch(&self) -> anyhow::Result<u64>;
+
     async fn get_pos_inflation_rate(&self) -> anyhow::Result<f64>;
+
     async fn get_delegators_validators(
         &self,
         address: &Address,
         epoch: u64,
     ) -> anyhow::Result<HashSet<Address>>;
+
     async fn query_native_token(&self) -> anyhow::Result<Address>;
+
     async fn query_pos_rewards(
         &self,
-        validators: HashSet<Address>,
+        validators: &HashSet<Address>,
         delegator_address: &Address,
     ) -> anyhow::Result<f64>;
+
     async fn query_bond(
         &self,
         validator: &Address,
         delegator: &Address,
         epoch: u64,
-    ) -> anyhow::Result<token::Amount>;
+    ) -> anyhow::Result<f64>;
+
+    async fn query_bonds(
+        &self,
+        validators: &HashSet<Address>,
+        delegator: &Address,
+        epoch: u64,
+    ) -> anyhow::Result<Vec<f64>> {
+        let bonds = futures::stream::iter(validators)
+            .map(|validator_address| async move {
+                self.query_bond(validator_address, &delegator, epoch)
+                    .await
+                    .unwrap_or_default()
+            })
+            .buffer_unordered(20)
+            .collect::<Vec<_>>()
+            .await;
+
+        Ok(bonds)
+    }
+
     async fn query_balance(
         &self,
         address: &Address,
         native_token_address: &Address,
     ) -> anyhow::Result<token::Amount>;
+
     async fn claim_rewards(
         &self,
         delegator_address: &Address,
-        validators: HashSet<Address>,
+        validators: &HashSet<Address>,
         secret_key: &SecretKey,
     ) -> anyhow::Result<()>;
+
     async fn bond(
         &self,
         delegator_address: &Address,
-        validators: HashSet<Address>,
+        validators: &HashSet<Address>,
         amount: token::Amount,
         secret_key: &SecretKey,
     ) -> anyhow::Result<()>;
+
     async fn query_validator_commissions(
         &self,
         validator: &Address,
         epoch: u64,
     ) -> anyhow::Result<f64>;
+
+    async fn query_validators_commissions(
+        &self,
+        validators: &HashSet<Address>,
+        epoch: u64,
+    ) -> anyhow::Result<Vec<f64>> {
+        let commissions = futures::stream::iter(validators)
+            .map(|address| async move {
+                self.query_validator_commissions(address, epoch)
+                    .await
+                    .unwrap_or_default()
+            })
+            .buffer_unordered(20)
+            .collect::<Vec<_>>()
+            .await;
+
+        Ok(commissions)
+    }
+
+    fn amount_to_f64(amount: token::Amount) -> anyhow::Result<f64> {
+        amount
+            .to_string_native()
+            .parse::<f64>()
+            .context("Invalid convertion from amount to f64")
+    }
+
+    fn dec_to_f64(amount: Dec) -> anyhow::Result<f64> {
+        amount
+            .to_string()
+            .parse::<f64>()
+            .context("Invalid convertion from dec to f64")
+    }
+
+    fn to_sdk_epoch(epoch: u64) -> NamadaEpoch {
+        NamadaEpoch(epoch)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -70,7 +133,7 @@ impl NamadaRpc for NamadaSdk {
         let pos_inflation = rpc::get_staking_rewards_rate(&self.client)
             .await
             .context("Failed fetching staking rewards")?;
-        utils::dec_to_f64(pos_inflation.inflation_rate)
+        Self::dec_to_f64(pos_inflation.inflation_rate)
     }
 
     async fn get_delegators_validators(
@@ -78,7 +141,7 @@ impl NamadaRpc for NamadaSdk {
         address: &Address,
         epoch: u64,
     ) -> anyhow::Result<HashSet<Address>> {
-        let epoch = utils::to_namada_epoch(epoch);
+        let epoch = Self::to_sdk_epoch(epoch);
         let index_set = rpc::get_delegation_validators(&self.client, address, epoch)
             .await
             .context("Failed fetching validators")?;
@@ -90,7 +153,7 @@ impl NamadaRpc for NamadaSdk {
 
     async fn query_pos_rewards(
         &self,
-        validators: HashSet<Address>,
+        validators: &HashSet<Address>,
         delegator_address: &Address,
     ) -> anyhow::Result<f64> {
         futures::stream::iter(validators)
@@ -112,13 +175,16 @@ impl NamadaRpc for NamadaSdk {
             .fold(token::Amount::zero(), |acc, amount| async move {
                 acc.checked_add(amount).unwrap()
             })
-            .map(|amount| utils::amount_to_f64(amount))
+            .map(|amount| Self::amount_to_f64(amount))
             .await
             .context("Error fetching bonds")
     }
 
-    async fn get_current_epoch(&self) -> anyhow::Result<Epoch> {
-        rpc::query_epoch(&self.client).await.context("Error fetching epoch")
+    async fn get_current_epoch(&self) -> anyhow::Result<u64> {
+        rpc::query_epoch(&self.client)
+            .await
+            .context("Error fetching epoch")
+            .map(|epoch| epoch.0)
     }
 
     async fn query_balance(
@@ -134,7 +200,7 @@ impl NamadaRpc for NamadaSdk {
     async fn claim_rewards(
         &self,
         delegator_address: &Address,
-        validators: HashSet<Address>,
+        validators: &HashSet<Address>,
         secret_key: &SecretKey,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -143,7 +209,7 @@ impl NamadaRpc for NamadaSdk {
     async fn bond(
         &self,
         delegator_address: &Address,
-        validators: HashSet<Address>,
+        validators: &HashSet<Address>,
         amount: token::Amount,
         secret_key: &SecretKey,
     ) -> anyhow::Result<()> {
@@ -155,11 +221,11 @@ impl NamadaRpc for NamadaSdk {
         validator: &Address,
         epoch: u64,
     ) -> anyhow::Result<f64> {
-        let epoch = utils::to_namada_epoch(epoch);
+        let epoch = Self::to_sdk_epoch(epoch);
         let commission = rpc::query_commission_rate(&self.client, validator, Some(epoch))
             .await
             .context("Error fetching validator commissions")?;
-        utils::dec_to_f64(commission.commission_rate.unwrap())
+        Self::dec_to_f64(commission.commission_rate.unwrap())
     }
 
     async fn query_bond(
@@ -167,98 +233,17 @@ impl NamadaRpc for NamadaSdk {
         validator: &Address,
         delegator: &Address,
         epoch: u64,
-    ) -> anyhow::Result<token::Amount> {
-        let epoch = utils::to_namada_epoch(epoch);
-        rpc::query_bond(&self.client, delegator, validator, Some(epoch))
+    ) -> anyhow::Result<f64> {
+        let epoch = Self::to_sdk_epoch(epoch);
+        let bonded_amount = rpc::query_bond(&self.client, delegator, validator, Some(epoch))
             .await
-            .context("Error fetching bonds")
+            .context("Error fetching bonds")?;
+        Self::amount_to_f64(bonded_amount)
     }
 
     async fn query_native_token(&self) -> anyhow::Result<Address> {
         rpc::query_native_token(&self.client)
             .await
             .context("Error fetching native token")
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TestNamadaSdk {
-    client: HttpClient,
-}
-
-impl NamadaRpc for TestNamadaSdk {
-    async fn get_pos_inflation_rate(&self) -> anyhow::Result<f64> {
-        Ok(Dec::new(1, 2).unwrap().to_string().parse::<f64>().unwrap())
-    }
-
-    async fn get_delegators_validators(
-        &self,
-        address: &Address,
-        epoch: u64,
-    ) -> anyhow::Result<HashSet<Address>> {
-        Ok(HashSet::from_iter([Address::from_str(
-            "tnam1qyff9lf3hsmlmj67lyqvxn9xez7a6utlhumk8vlv",
-        )
-        .unwrap()]))
-    }
-
-    async fn query_pos_rewards(
-        &self,
-        validators: HashSet<Address>,
-        delegator_address: &Address,
-    ) -> anyhow::Result<f64> {
-        todo!()
-    }
-
-    async fn get_current_epoch(&self) -> anyhow::Result<Epoch> {
-        Ok(Epoch(1))
-    }
-
-    async fn query_balance(
-        &self,
-        address: &Address,
-        native_token_address: &Address,
-    ) -> anyhow::Result<token::Amount> {
-        todo!()
-    }
-
-    async fn claim_rewards(
-        &self,
-        delegator_address: &Address,
-        validators: HashSet<Address>,
-        secret_key: &SecretKey,
-    ) -> anyhow::Result<()> {
-        todo!()
-    }
-
-    async fn bond(
-        &self,
-        delegator_address: &Address,
-        validators: HashSet<Address>,
-        amount: token::Amount,
-        secret_key: &SecretKey,
-    ) -> anyhow::Result<()> {
-        todo!()
-    }
-
-    async fn query_validator_commissions(
-        &self,
-        validator: &Address,
-        epoch: u64,
-    ) -> anyhow::Result<f64> {
-        todo!()
-    }
-
-    async fn query_bond(
-        &self,
-        validator: &Address,
-        delegator: &Address,
-        epoch: u64,
-    ) -> anyhow::Result<token::Amount> {
-        todo!()
-    }
-
-    async fn query_native_token(&self) -> anyhow::Result<Address> {
-        todo!()
     }
 }
