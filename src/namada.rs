@@ -78,13 +78,7 @@ pub trait NamadaRpc {
         &self,
         validator: &Address,
         epoch: u64,
-    ) -> anyhow::Result<f64> {
-        let epoch = Self::to_sdk_epoch(epoch);
-        let commission = rpc::query_commission_rate(&self.client, validator, Some(epoch))
-            .await
-            .context("Error fetching validator commissions")?;
-        Self::dec_to_f64(commission.commission_rate.unwrap())
-    }
+    ) -> anyhow::Result<f64>;
 
     async fn query_validators_commissions(
         &self,
