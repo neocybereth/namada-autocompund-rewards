@@ -1,12 +1,34 @@
-use std::collections::HashSet;
-
 use anyhow::Context;
 use futures::{FutureExt, StreamExt};
 use namada_sdk::{
-    address::Address, dec::Dec, key::common::SecretKey, queries::RPC, rpc,
-    state::Epoch as NamadaEpoch, token,
+    account::Address,
+    dec::Dec,
+    io::NullIo,
+    key::common::SecretKey,
+    masp::fs::FsShieldedUtils,
+    masp::ShieldedContext,
+    masp::ShieldedWallet,
+    queries::RPC,
+    rpc,
+    signing::default_sign,
+    state::Epoch as NamadaEpoch,
+    token::{self, Amount},
+    wallet::fs::FsWalletUtils,
+    Namada,
 };
+use std::collections::HashSet;
 use tendermint_rpc::HttpClient;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum TaskError {
+    #[error("error waiting for timeout")]
+    Timeout,
+    #[error("error building tx `{0}`")]
+    Build(String),
+    #[error("error fetching shielded context data `{0}`")]
+    ShieldedSync(String),
+}
 
 pub trait NamadaRpc {
     async fn get_current_epoch(&self) -> anyhow::Result<u64>;
@@ -200,13 +222,32 @@ impl NamadaRpc for NamadaSdk {
         validators: &HashSet<Address>,
         secret_key: &SecretKey,
     ) -> anyhow::Result<()> {
-        let epoch = self.get_current_epoch().await?;
-        let epoch = Self::to_sdk_epoch(epoch);
-        let validators = validators.iter().map(|v| v.clone()).collect::<Vec<_>>();
-        let secret_key = secret_key.to_string();
-        let tx = rpc::claim_rewards(&self.client, delegator_address, validators, epoch, secret_key)
+        let null_io = NullIo;
+        let wallet = FsWalletUtils::new("./sdk-wallet".into());
+        let shielded = ShieldedWallet::<FsShieldedUtils>::default();
+        let namada = namada_sdk::NamadaImpl::new(self.client.clone(), wallet, shielded, null_io)
             .await
-            .context("Error claiming rewards")?;
+            .expect("Unable to initialize Namada context");
+        futures::stream::iter(validators).map(|validator_address| async {
+            let mut claim_rewards_tx_builder = namada.new_claim_rewards(validator_address.clone());
+            claim_rewards_tx_builder.source = Some(delegator_address.clone());
+
+            let (mut claim_reward_tx, signing_data) = claim_rewards_tx_builder
+                .build(&namada)
+                .await
+                .map_err(|e| TaskError::Build(e.to_string()))?;
+
+            let tx = namada
+                .sign_tx_data_with_proof(
+                    &mut claim_reward_tx,
+                    &claim_rewards_tx_builder,
+                    signing_data,
+                    default_sign,
+                    (),
+                )
+                .await?;
+            // Submit transaction here
+        });
         Ok(())
     }
 
@@ -217,14 +258,13 @@ impl NamadaRpc for NamadaSdk {
         amount: token::Amount,
         secret_key: &SecretKey,
     ) -> anyhow::Result<()> {
-        let epoch = self.get_current_epoch().await?;
-        let epoch = Self::to_sdk_epoch(epoch);
-        let validators = validators.iter().map(|v| v.clone()).collect::<Vec<_>>();
-        let amount = amount.to_string_native();
-        let secret_key = secret_key.to_string();
-        let tx = rpc::bond(&self.client, delegator_address, validators, amount, epoch, secret_key)
-            .await
-            .context("Error bonding")?;
+        let namada = namada_sdk::NamadaImpl::new(&self.client, None, None, None);
+        let bonds = futures::stream::iter(validators).map(|validator_address| async move {
+            namada
+                .await?
+                .new_bond(validator_address.clone(), amount, None, None);
+        });
+
         Ok(())
     }
 

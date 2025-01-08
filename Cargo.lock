@@ -3410,6 +3410,7 @@ dependencies = [
  "namada_sdk",
  "tendermint-config",
  "tendermint-rpc",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
