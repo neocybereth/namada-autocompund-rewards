@@ -28,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
 
     let client = HttpClient::new(config.namada_rpc.as_str()).context("Invalid http url")?;
     let namada_sdk = NamadaSdk::new(client);
+
     loop {
         let current_epoch = namada_sdk.get_current_epoch().await?;
 

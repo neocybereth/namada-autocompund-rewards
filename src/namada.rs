@@ -78,7 +78,13 @@ pub trait NamadaRpc {
         &self,
         validator: &Address,
         epoch: u64,
-    ) -> anyhow::Result<f64>;
+    ) -> anyhow::Result<f64> {
+        let epoch = Self::to_sdk_epoch(epoch);
+        let commission = rpc::query_commission_rate(&self.client, validator, Some(epoch))
+            .await
+            .context("Error fetching validator commissions")?;
+        Self::dec_to_f64(commission.commission_rate.unwrap())
+    }
 
     async fn query_validators_commissions(
         &self,
@@ -200,6 +206,13 @@ impl NamadaRpc for NamadaSdk {
         validators: &HashSet<Address>,
         secret_key: &SecretKey,
     ) -> anyhow::Result<()> {
+        let epoch = self.get_current_epoch().await?;
+        let epoch = Self::to_sdk_epoch(epoch);
+        let validators = validators.iter().map(|v| v.clone()).collect::<Vec<_>>();
+        let secret_key = secret_key.to_string();
+        let tx = rpc::claim_rewards(&self.client, delegator_address, validators, epoch, secret_key)
+            .await
+            .context("Error claiming rewards")?;
         Ok(())
     }
 
@@ -210,6 +223,14 @@ impl NamadaRpc for NamadaSdk {
         amount: token::Amount,
         secret_key: &SecretKey,
     ) -> anyhow::Result<()> {
+        let epoch = self.get_current_epoch().await?;
+        let epoch = Self::to_sdk_epoch(epoch);
+        let validators = validators.iter().map(|v| v.clone()).collect::<Vec<_>>();
+        let amount = amount.to_string_native();
+        let secret_key = secret_key.to_string();
+        let tx = rpc::bond(&self.client, delegator_address, validators, amount, epoch, secret_key)
+            .await
+            .context("Error bonding")?;
         Ok(())
     }
 
